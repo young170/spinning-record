@@ -1,3 +1,4 @@
+package test_files;
 
 public class Example {
 

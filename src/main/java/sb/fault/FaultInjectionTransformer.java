@@ -6,10 +6,17 @@ import java.security.ProtectionDomain;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 public class FaultInjectionTransformer implements ClassFileTransformer {
+
+    private final MutationConfig config;
+
+    public FaultInjectionTransformer(MutationConfig config) {
+        this.config = config;
+    }
 
     @Override
     public byte[] transform(
@@ -20,17 +27,23 @@ public class FaultInjectionTransformer implements ClassFileTransformer {
             byte[] classfileBuffer
     ) {
 
-        // 1. Skip bootstrap
+        // Bootstrap
         if (loader == null) {
             return null;
         }
 
-        // 2. Skip JDK + agent + ASM
+        // Skip JDK + agent + ASM
         if (className == null
                 || className.startsWith("java/")
                 || className.startsWith("jdk/")
                 || className.startsWith("sun/")
-                || className.startsWith("org/objectweb/asm/")) {
+                || className.startsWith("org/objectweb/asm/")
+                || className.startsWith("sb/fault/")) {
+            return null;
+        }
+
+        // Only mutate application package
+        if (!className.startsWith("test_files/")) {
             return null;
         }
 
@@ -39,6 +52,7 @@ public class FaultInjectionTransformer implements ClassFileTransformer {
             ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_FRAMES);
 
             ClassVisitor cv = new ClassVisitor(Opcodes.ASM9, cw) {
+
                 @Override
                 public MethodVisitor visitMethod(
                         int access,
@@ -52,28 +66,43 @@ public class FaultInjectionTransformer implements ClassFileTransformer {
                     );
 
                     return new MethodVisitor(Opcodes.ASM9, mv) {
+
+                        private int currentLine = -1;
+
+                        @Override
+                        public void visitLineNumber(int line, Label start) {
+                            currentLine = line;
+                            super.visitLineNumber(line, start);
+                        }
+
                         @Override
                         public void visitInsn(int opcode) {
-                            // Fault: replace IADD with ISUB
-                            if (opcode == Opcodes.IADD) {
-                                System.out.println(
-                                        "[FaultInjected] Replacing IADD with ISUB in "
-                                        + className + "." + name
-                                );
-                                super.visitInsn(Opcodes.ISUB);
-                            } else {
-                                super.visitInsn(opcode);
+
+                            if (config.isTargetLine(currentLine)) {
+                                for (MutationOperator op : config.operators()) {
+                                    if (op.matches(opcode)) {
+                                        System.out.println(
+                                                "[FaultInjected] "
+                                                + className + "." + name
+                                                + " line " + currentLine
+                                                + " " + op.name()
+                                        );
+                                        op.apply(mv);
+                                        return;
+                                    }
+                                }
                             }
+
+                            super.visitInsn(opcode);
                         }
                     };
                 }
             };
 
-            cr.accept(cv, 0);
+            cr.accept(cv, ClassReader.EXPAND_FRAMES);
             return cw.toByteArray();
 
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Throwable t) {
             return null;
         }
     }
